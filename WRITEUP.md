@@ -1,147 +1,111 @@
 # Teaching Ghidra to Read glibc
 
-## Naming the library functions in stripped static binaries so you can find the code that actually matters
+*Naming the library functions in a stripped static binary so the author's code stands out*
 
-If you have ever opened a stripped, statically linked binary in Ghidra, you have seen the wall. A thousand functions, all named `FUN_00401000`, `FUN_00401337`, and so on. No hints. No imports. Just a sea of addresses. Somewhere in there is the one function the author wrote, the thing you actually opened the file to read. The rest is the C library, compiled in and stripped of its names.
+Open a stripped, statically linked binary in Ghidra and you meet a wall of `FUN_00401000`, `FUN_00401337`, and a thousand more like them. No names, no imports, only addresses. One of those functions is the thing you opened the file to read, and the other thousand are the C library, compiled in and stripped of every name that would have told you so.
 
-This post is about clearing that wall once and for good. I built a reusable database that names the library functions automatically, so every binary I open from now on shows me a short list of unknown functions instead of a thousand. That short list is the code I came to read.
+This is about clearing that wall once. I built a database that recognizes glibc functions and labels them on sight, so every binary I open afterward shows me a handful of unknowns where a thousand used to be, and those unknowns are the code worth my time. What follows is the problem, the two tools Ghidra gives you for it, how I built each one, and the mistake that cost me an afternoon before I understood what I had done wrong. All the scripts are in the repo. The reasoning is the part worth reading, because once you see why each step exists you can build your own version or repair mine when a stubborn binary refuses to cooperate.
 
-I will explain the problem first, then the two tools that solve it, then how I built them and the mistakes I made along the way. There is a repo with all the scripts. The point here is the reasoning, so you can build your own or fix mine when a binary does not cooperate.
+## What You Are Looking At
 
-## What is actually going on
+A few terms first, so the rest reads cleanly.
 
-A few terms first, so the rest makes sense.
+A symbol is a name pinned to an address, something like `main` or `printf`. Compilers emit them, and they are what turns a screen of hex into something you can follow.
 
-A **symbol** is a name attached to an address in a program, like `main` or `printf`. Compilers add them. They are what makes a disassembler readable.
+Stripped means someone removed those names after the build. The program runs exactly as before. Only the map is gone.
 
-**Stripped** means those names were removed after the binary was built. The code still works. The map is just gone.
+Statically linked means the C library was copied into the binary when it was built. A dynamically linked binary leaves the library on the system and loads it at run time, which keeps the import names in view, so `printf` shows up as `printf` at no cost to you. A static binary carries the whole library inside itself, and after stripping, all of that borrowed code turns into nameless functions.
 
-**Statically linked** means the C library was copied into the binary at build time instead of being loaded from the system at run time. A dynamically linked binary keeps its imports, so `printf` still shows up as `printf` for free. A static binary has the whole library baked in, and once it is stripped, all of that library code shows up nameless.
+glibc is the GNU C Library, the standard C library on most Linux systems, and it is not small. Linked statically into a program, it can contribute well over a thousand functions on its own.
 
-**glibc** is the GNU C Library, the standard C library on most Linux systems. It is large. When it gets statically linked into a program, it can add well over a thousand functions.
+Here is what that looked like on a real target, a CTF binary named "printf to pay respects." Ghidra found 1,161 functions. After a full pass of analysis, seven of them had names, and every one came from the loader. None was a real identification. Of the 1,161, a single function was the author's own work, and the remaining 1,160 were glibc.
 
-So here is the situation on a real target. I opened a CTF binary called "printf to pay respects." Ghidra found 1,161 functions. After a full analysis, exactly 7 had names, and those came from the loader, not from any real identification. One of those 1,161 functions was the code the author wrote. The other 1,160 were glibc.
+## Why This Is Worth the Trouble
 
-## Why this is worth solving
+The whole reason I opened the file was to read that one function. Everything around it was library code I already know cold, and the difficulty was telling one from the other, since on screen they were identical: a `FUN_`, an address, nothing else.
 
-The work I came to do was read that one function. The other 1,160 were library code I already understand. The problem was I could not tell which was which. Every function looked the same: a `FUN_` and an address.
+So you do the tedious thing. You read a library function by hand, follow its calls, conclude it is `fopen`, and set it aside. Then the next binary lands and you begin again, because nothing you learned carried forward. Once, that is reasonable. As a standing habit it drains the hours you should be spending on the target. In a CTF the clock is the whole contest, and every minute rediscovering `fopen` is a minute you did not spend on the puzzle. In malware or firmware work it can decide whether you read the payload this afternoon or next week.
 
-So you end up reading library code by hand just to prove it is library code. You trace the calls in some function, realize it is `fopen`, and move on. Then the next binary lands and you do it all again, because the names never carried over.
+The way out is to pay that cost a single time. Fingerprint the library functions once, keep the fingerprints, and hand them to Ghidra. From then on, every binary you analyze gets its library code named for you, and whatever stays nameless is, by elimination, the author's code. The wall becomes a list.
 
-Doing that once is fine. Doing it on every binary forever is a waste. In a CTF, the clock is the whole game, and time spent re-deriving `fopen` is time not spent on the challenge. In malware or firmware work, it is the gap between reading the payload today or next week.
+## The First Tool: Function ID
 
-The fix is to pay that cost a single time. Fingerprint the library functions once, store the fingerprints, and attach them to Ghidra. From then on, every binary you open gets its library functions named automatically. The functions that stay nameless are the author's code. The wall becomes a list.
+Ghidra ships with a feature called Function ID, or FID, and the idea behind it is clean. It computes a hash, a compact fingerprint, of each function's instructions, and it stores those hashes alongside the real names in a database. When you analyze something new, it fingerprints every function and checks the database for a match. A hit means it can drop the name straight onto the function.
 
-## Tool one: Function ID
+Ghidra includes a few of these databases out of the box, but they favor Windows software and cover very little Linux glibc. On my target they matched nothing at all, which is how 1,160 glibc functions stayed anonymous. The obvious move was to build my own from the glibc versions I keep meeting, and to grow it over time.
 
-Ghidra ships with a feature called **Function ID**, or FID. The idea is simple. It takes a hash, a short fingerprint, of each function's instructions. It stores those hashes in a database along with the real names. When you analyze a new binary, it hashes every function and looks for the same fingerprint in the database. A match means it can apply the name.
+### Getting Clean glibc to Fingerprint
 
-Ghidra comes with a few of these databases, but they lean toward Windows software and do not cover most Linux glibc builds. On my target, the shipped databases matched nothing. Every glibc function stayed a `FUN_`.
+To fingerprint glibc, I need copies of it that still carry their names. Docker images are the tidiest source, one per version, each a known and repeatable snapshot of the library with symbols intact. I pulled the static library archives from four Ubuntu releases, which between them cover a wide span of what turns up in the wild:
 
-So the plan was to build my own FID database from the glibc versions I run into, and keep adding to it over time.
+- Ubuntu 18.04 carries glibc 2.27
+- Ubuntu 20.04 carries glibc 2.31
+- Ubuntu 22.04 carries glibc 2.35
+- Ubuntu 24.04 carries glibc 2.39
 
-### Getting clean glibc to fingerprint
+A static library archive is a `.a` file, which you can picture as a small archive of object files, each holding a function or two. That fine granularity is what FID wants to work with.
 
-To fingerprint glibc functions, I need copies of glibc that still have their names. The cleanest source is Docker images, one per version. Each image gives a known, reproducible copy of the library with symbols intact.
+### Building the Database
 
-I pulled the static library archives from four Ubuntu releases:
+Three moves make the database. First you import the archives into a Ghidra project, telling it to recurse into each `.a` so the archive expands into its member object files. Skip the recursion and you get one opaque blob with nothing to fingerprint. Include it and every glibc function arrives as its own analyzable unit. Next you analyze them, which gives each function real instructions for FID to hash. Last you populate the database, hashing every function and filing the hash with its name and its glibc version.
 
-- Ubuntu 18.04 gives glibc 2.27
-- Ubuntu 20.04 gives glibc 2.31
-- Ubuntu 22.04 gives glibc 2.35
-- Ubuntu 24.04 gives glibc 2.39
+I wrote a small script for each move so the whole run is repeatable and I never click through a menu twice. They are in the repo. The first build came out to 29,578 functions across those four glibc versions, in both 32-bit and 64-bit.
 
-A static library archive is a `.a` file. Think of it as a zip of small object files, one or a few functions each. That granularity is exactly what FID wants.
+## The First Attempt, and the Lesson It Taught
 
-### Building the database
+I attached the database, ran Function ID again on the printf binary, and watched the count of named functions climb from 7 to 144. Progress, and yet the functions I had come for, the `fopen`, `fgets`, and `printf` calls inside the target, were all still `FUN_`. Something was off.
 
-The build has three moves.
-
-Import the archives into a Ghidra project. When you import a `.a` archive, you tell Ghidra to recurse into it so it expands into the member object files. Without that, you get one opaque blob and no functions to hash. With it, you get every glibc function as its own analyzable unit.
-
-Analyze them, so each function has real instructions for FID to fingerprint.
-
-Populate the database, which hashes every function and stores the hash with its name and its library version.
-
-I wrote small scripts for each step so the whole thing is repeatable, and so I am not clicking through menus. They are in the repo.
-
-The first build produced a database with 29,578 functions across those four glibc versions, in both 32-bit and 64-bit.
-
-## The first attempt, and the lesson that saved me
-
-I attached the database, re-ran Function ID on the printf binary, and watched the named count jump from 7 to 144.
-
-Better. But the functions I actually cared about, the `fopen`, `fgets`, and `printf` calls inside the target function, were still `FUN_`. Something was off.
-
-Here is the lesson, and it is the most useful thing in this whole post.
-
-**Check the toolchain of your target before you build the database.** Every binary carries a small string that names the compiler that built it. You can read it with one command:
+The lesson here is the most useful thing in this writeup, so I will state it plainly. Read the toolchain of your target before you build the database. Every binary carries a short string naming the compiler that produced it, and one command pulls it out:
 
 ```
 strings -a <binary> | grep -iE 'glibc|release version|GCC:'
 ```
 
-My binary said `GCC 15.2.1 20250813`. That is a very recent compiler, the kind you find on a rolling-release distro like Arch, not on Ubuntu. Ubuntu 24.04, my newest source, ships an older GCC.
+Mine reported `GCC 15.2.1 20250813`, a compiler recent enough to belong to a rolling-release distribution like Arch. None of the Ubuntu releases I had pulled ship anything close to that.
 
-Function ID matches on exact bytes. glibc compiled by an old Ubuntu GCC does not produce the same bytes as glibc compiled by a new Arch GCC, even for the same function. Different bytes, no match. The 144 that did match were mostly stable dynamic-linker internals that happen to look the same across builds. The functions I wanted were compiled differently, so they slipped through.
+Function ID matches on exact bytes. glibc compiled by an older Ubuntu GCC lays down different bytes from glibc compiled by a newer Arch GCC, even for one and the same function. When the bytes differ the hash differs, and the match never happens. The 144 that did land were mostly dynamic-linker internals stable enough to look the same across builds. The functions I wanted were compiled another way and slipped past. My four Ubuntu versions were the wrong library for this binary, and that one compiler string would have told me so before I spent an afternoon finding out.
 
-The four Ubuntu versions were the wrong source for this binary. One string would have told me that on day one.
+## The Fix: Match the Toolchain Exactly
 
-## The fix: match the toolchain exactly
+The binary was built on Arch, and Arch keeps a dated archive of every package it has ever shipped, so I did not have to guess. I pulled the glibc that was live on Arch on the compiler's build date, the 13th of August 2025, which gave me byte for byte the library the author had linked against. It came back as glibc 2.42.
 
-The binary was built on Arch. Arch keeps a dated archive of every package it ever shipped. So I did not have to guess. I pulled the glibc that was live on Arch on the compiler's build date, August 13, 2025. That is byte for byte the library the author linked against.
+I built a small database from that one library, attached it beside the first, and ran Function ID once more. The named count went from 144 to 656, and `puts` resolved correctly on its own. The exact match did its job.
 
-The version came back as glibc 2.42. I built a small database from just that one library, attached it alongside the first, and re-ran Function ID.
+## The Blind Spot Both Tools Share
 
-Named functions jumped from 144 to 656. `puts` came back correct on its own. The exact match worked.
+Even with the right library in hand, three functions in my target stayed wrong or missing, and the reason is worth understanding, because it is a permanent limit and knowing about it saves you a lot of squinting.
 
-## The blind spot both tools share
+`printf` came back labeled `wscanf`. The thin wrapper functions in a C library, the likes of `printf`, `fprintf`, `scanf`, and `wscanf`, set up their arguments with almost identical code and differ only in a single internal pointer they hand off. Their fingerprints collide, so Function ID cannot separate them and picks one, which this time was the wrong one. The database is fine. Those functions are identical in the bytes FID inspects.
 
-Even with the exact library, three functions in my target were still wrong or missing. This is worth understanding, because it is a permanent limit, not a bug.
+`fopen` stayed nameless because it is a 13-byte stub that does little more than jump into an internal routine, too small to fingerprint. `fgets` stayed nameless too.
 
-`printf` came back labeled as `wscanf`. The thin wrapper functions in a C library, `printf`, `fprintf`, `scanf`, `wscanf`, all set up their arguments with nearly identical code and differ only in one internal pointer they pass. Their fingerprints collide. Function ID cannot tell them apart, so it picks one, and here it picked wrong. This is not a gap in the database. Those functions are genuinely identical in the bytes FID looks at.
+The cure for this handful is a one-time fix by hand, which is ordinary practice. Function ID handles the bulk and you tidy up the few it cannot resolve. There is a shortcut for spotting them. Read the internal function each wrapper calls, since those larger routines do get named. `fopen`'s little stub jumps to `__fopen_internal`, and once you see that, the wrapper names itself.
 
-`fopen` stayed nameless. It is a 13-byte stub that just jumps to an internal function. Too small to fingerprint.
+## The Second Tool: BSim
 
-`fgets` stayed nameless as well.
+Function ID is fast, automatic, and exact, and that exactness is also where it falls down, on functions that drift between builds or share their bytes with siblings. Ghidra answers that with a second tool called BSim. It works from the shape of the decompiled function and the data the function touches, which lets it match across compiler versions and separate functions that look byte-identical to FID.
 
-The fix for these few is a one-time hand correction, which is normal. Function ID does the mass naming, you clean up the handful it cannot resolve. And there is a shortcut for identifying them: read the internal function each one calls. `fopen`'s tiny stub calls `__fopen_internal`, which the database did name. So even a nameless wrapper is easy to identify from the named code around it.
+The cost is in how you drive it. Function ID names things on its own during analysis, while BSim is something you query. You open a binary, run a search across its functions, and apply the strong matches, one query and one apply per file.
 
-## Tool two: BSim, for the harder cases
+I built a BSim database from the same glibc programs I had already imported, so there was nothing new to download. Then I ran its Overview against the printf binary, which sweeps every function at once and reports how many have matches, and it lit up across all 843 functions in the program.
 
-Function ID is fast and automatic, and it is exact. That exactness is its weakness on functions that drift between builds or share bytes with siblings.
+Two numbers guide you when you read BSim results. Hit count is how many library functions resemble the one in front of you. Significance is how distinctive that function is. A function with thousands of hits and low significance is generic and weak evidence, while one with a low hit count and high significance is distinctive, and a strong similarity match there is a confident call. Sort by significance, skip past the generic rows, and work down the distinctive ones.
 
-Ghidra has a second tool for that, called **BSim**. Instead of hashing raw bytes, BSim compares the structure of the decompiled function and the data it references. That lets it match functions across compiler versions and tell apart functions that look byte-identical to FID.
+One more detail earns BSim its place. It returned zero matches on the author's own function, the very one I cared about, which is exactly right, since that code resembles nothing in glibc. By the same logic, the functions with no matches are your shortlist of code to read. The tool points you at the interesting parts by leaving them blank.
 
-The tradeoff is how you use it. Function ID names things automatically during analysis. BSim is something you query. You open a binary, run a search over its functions, and apply the strong matches. It is one query and one apply per binary.
+## What You End Up With
 
-I built a BSim database from the same glibc programs I had already imported, so no extra downloading. Then I ran its Overview on the printf binary, which scans every function at once and reports how many have matches. It lit up across all 843 functions in the program.
+Two layers that cover each other's gaps. Function ID names the mass of the library on its own the moment you analyze a binary, as long as you hold the matching build in your database. BSim, run by hand per file, fills in the larger functions Function ID missed and copes with binaries whose exact build you never pulled. The smallest wrappers fall through both tools, and for those the one-time fix by hand stands, a short list made easy by the named code around it.
 
-Two things to know when reading BSim results. **Hit count** is how many library functions resemble this one. **Significance** is how distinctive the function is. A function with thousands of hits and low significance is generic and weak evidence. A function with a low hit count and high significance is distinctive, and a strong similarity match there is a confident identification. Sort by significance, ignore the generic rows, work down the distinctive ones.
+The return grows the more you use it. The database serves every binary I open, and it improves each time I add a build I have run into. The hours behind it are spent once, and every future binary it names is time I never spend again.
 
-One more useful detail. BSim returned zero matches on the author's own function, the one I actually cared about. That is correct. It is not glibc, so nothing in the database resembles it. Which means the functions with no matches are your short list of code to read. The tool points you at the interesting parts by process of elimination.
+## Adding a New Build Later
 
-## What you end up with
-
-Two layers.
-
-Function ID names the bulk of the library automatically, the moment you analyze a binary, as long as you have the matching build in your database.
-
-BSim, run by hand per binary, fills in the larger functions Function ID missed and handles binaries whose exact build you never pulled.
-
-The tiny wrappers floor out of both tools, and for those the one-time hand fix stands. It is a small list, and the named code around them makes them obvious.
-
-The payoff compounds. The database is not for one binary. It gets better every time I add a build I have run into, and the hours I spent building it are spent once. Every future binary it names is time I never spend again.
-
-## Adding a new build later
-
-When a binary does not match, its build is not in the database yet. The process to add it is the same each time:
+When a binary comes up empty, its build is missing from the database, and the routine to add it is the same every time:
 
 1. Read the compiler string with `strings -a <binary> | grep -iE 'glibc|GCC:'`.
-2. Pull that exact glibc. For a rolling distro, use the dated archive so you get the exact version.
+2. Pull that exact glibc. For a rolling distro, use the dated archive so you land on the precise version.
 3. Import and populate it into the database.
-4. Re-attach and re-run.
+4. Re-attach and run again.
 
-Over time the gaps fill in, and the wall you started with turns into a short list on almost every binary you open.
-
-The scripts for all of this are in the repo. Take them, break them, and fix them when a stubborn binary shows up. That is the whole point of building the thing yourself.
+The gaps close over time, and the thousand-function wall you began with becomes a short list on nearly everything you open. The scripts for all of it are in the repo. Take them, break them, and fix them when a difficult binary shows up, which is the whole reason to build the thing yourself.
