@@ -1,0 +1,18 @@
+# Do not commit glibc binaries. They are copyrighted.
+glibc-archives/
+
+# Function ID databases are large and rebuildable. Publish the recipe, not the artifact.
+*.fidb
+
+# Headless build project and logs are local scratch.
+fidproject/
+*.log
+
+# BSim intermediate signature files (thousands of XML) and the database.
+bsim_sigs/
+bsim/
+*.mv.db
+
+# Editor and OS noise
+.DS_Store
+*.swp
