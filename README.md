@@ -30,7 +30,7 @@ See `NOTES.md` for the design decisions, the gotchas we hit, and writeup materia
 ## Step 1: stage the glibc archives
 
 ```
-cd ~/ctf/tools/ghidra-glibc-fid
+cd ~/ghidra-glibc-fid
 ./scripts/pull_glibc.sh
 ```
 
@@ -63,11 +63,11 @@ On glibc 2.34 and newer, `libpthread.a` is a small stub because pthread was fold
 ## Step 2: install a matching Ghidra (Linux side)
 
 ```
-cd ~/ctf/tools/ghidra-glibc-fid
+cd ~/ghidra-glibc-fid
 ./scripts/install_ghidra_linux.sh
 ```
 
-This installs Ghidra beside the repo at `~/ctf/tools/ghidra_12.1.2_PUBLIC/`, kept out of the git tree on purpose. It pins the version to match the Windows GUI so the finished database loads on both sides. The download is verified against the published SHA-256 before use.
+This installs Ghidra beside the repo at `~/ghidra_12.1.2_PUBLIC/`, kept out of the git tree on purpose. It pins the version to match the Windows GUI so the finished database loads on both sides. The download is verified against the published SHA-256 before use.
 
 - Version: 12.1.2
 - Asset: `ghidra_12.1.2_PUBLIC_20260605.zip`
@@ -79,7 +79,7 @@ If you bump the Windows Ghidra later, update the pinned values at the top of `sc
 ## Step 3a: import the archives into a Ghidra project
 
 ```
-cd ~/ctf/tools/ghidra-glibc-fid
+cd ~/ghidra-glibc-fid
 ./scripts/build_import.sh
 ```
 
@@ -97,7 +97,7 @@ Imports persist in the project, so this slow step runs once and the populate ste
 ## Step 3b: create and populate the FID database
 
 ```
-cd ~/ctf/tools/ghidra-glibc-fid
+cd ~/ghidra-glibc-fid
 ./scripts/build_populate.sh
 ```
 
@@ -112,7 +112,7 @@ Re-running rebuilds from scratch. An existing `glibc.fidb` at the path is delete
 Copy the database to a Windows path, e.g.:
 
 ```
-cp ~/ctf/tools/ghidra-glibc-fid/glibc.fidb /mnt/c/Users/<you>/ghidra-fid/glibc.fidb
+cp ~/ghidra-glibc-fid/glibc.fidb /mnt/c/Users/<you>/ghidra-fid/glibc.fidb
 ```
 
 In the GUI: Tools, Function ID, Choose active FidDbs, Attach existing FidDb, and select the file. It stays attached across restarts and applies during analysis.
